@@ -1,0 +1,85 @@
+# -----------------------------------------------------------------------------
+# api-gateway — porta de entrada única (ADR-0005)
+# Rotas, retry e circuit breaker: com.ms.gateway.config. Aqui ficam o registro
+# (Eureka), os timeouts de conexão e a observabilidade (mesma convenção do ADR-0003).
+# -----------------------------------------------------------------------------
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: ${GATEWAY_CONNECT_TIMEOUT_MS:1000}
+          metrics:
+            enabled: true     # spring.cloud.gateway.requests por rota (routeId), com percentis abaixo
+    circuitbreaker:
+      bulkhead:
+        resilience4j:
+          # Ligado por padrão (25 chamadas simultâneas por rota): o excedente viraria falha e abriria
+          # o circuito sob carga normal. O circuito só deve contar conexão e timeout (ADR-0005).
+          enabled: false
+    loadbalancer:
+      cache:
+        # Réplica nova ou removida passa a valer em segundos (padrão: 35 s).
+        ttl: ${LOADBALANCER_CACHE_TTL:5s}
+
+server:
+  port: 8080
+
+gateway:
+  resiliencia:
+    timeout: ${GATEWAY_TIMEOUT:5s}            # p99 do cadastro é 500 ms (SLO-2): 5 s só pega réplica travada
+    janela: 10                                # últimas 10 chamadas
+    taxa-de-falha: 50                         # % de falhas (conexão ou timeout) que abre o circuito
+    tempo-aberto: 10s
+    chamadas-meio-aberto: 3
+
+eureka:
+  client:
+    enabled: ${EUREKA_ENABLED:true}
+    register-with-eureka: false              # o gateway só consulta o registro
+    fetch-registry: true
+    registry-fetch-interval-seconds: 5
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+
+# --- Observabilidade (ADR-0003) ---------------------------------------------
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    root: INFO
+    com.ms.gateway: INFO
+
+management:
+  endpoints:
+    web:
+      base-path: /          # /health, /info e /metrics na raiz, como nos serviços
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: ${HEALTH_SHOW_DETAILS:always}
+      validate-group-membership: false
+      probes:
+        enabled: true
+      group:
+        readiness:
+          # Registro fora do ar não tira o gateway de serviço: ele segue com o último registro em cache.
+          include: readinessState
+  metrics:
+    distribution:
+      percentiles:
+        "[http.server.requests]": 0.5,0.95,0.99
+        "[spring.cloud.gateway.requests]": 0.5,0.95,0.99
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: api-gateway
+    description: Porta de entrada única; roteia /user e /emails para as réplicas registradas no Eureka
