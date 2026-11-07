@@ -1,0 +1,33 @@
+# Segredos locais — nunca versionar (ADR-0004)
+.env
+
+# Build
+target/
+**/target/
+!**/src/main/**/target/
+!**/src/test/**/target/
+.mvn/wrapper/maven-wrapper.jar
+
+# IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+
+# Resultados brutos do k6 (o .md resumido é versionado)
+docs/performance/resultados/*.json
+
+# SO
+.DS_Store
+Thumbs.db
+
+#docs
+.specs
+.cursor
+.claude
+.agents

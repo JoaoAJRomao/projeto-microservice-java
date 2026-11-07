@@ -1,0 +1,99 @@
+# -----------------------------------------------------------------------------
+# ms-user — configuração
+# Nenhum segredo real fica neste arquivo (ver ADR-0004). Os valores padrão
+# abaixo só funcionam com o ambiente local do docker-compose e podem ser
+# sobrescritos por variáveis de ambiente.
+# -----------------------------------------------------------------------------
+spring:
+  application:
+    name: ms-user
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/ms_user}
+    username: ${DB_USERNAME:ms_user}
+    password: ${DB_PASSWORD:ms_user_dev}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      # Por réplica: 5 réplicas x 10 = 50 conexões, abaixo do max_connections=100 do Postgres.
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+  jpa:
+    hibernate:
+      ddl-auto: validate    # o esquema vem do Flyway (db/migration), ADR-0006
+    show-sql: ${SHOW_SQL:false}
+    open-in-view: false
+  flyway:
+    # Bancos criados pelo Hibernate antes do Flyway: baseline na V1, sem executá-la.
+    baseline-on-migrate: true
+    baseline-version: 1
+  rabbitmq:
+    # Local (docker-compose): amqp://usuario:senha@rabbitmq:5672
+    # Nuvem (CloudAMQP):      amqps://usuario:senha@host/vhost  -> definir via variável de ambiente
+    addresses: ${RABBITMQ_ADDRESSES:amqp://app:app_dev@localhost:5672}
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: 8081
+
+# --- Service discovery (ADR-0005) --------------------------------------------
+# Status no registro segue o ciclo de vida da aplicação, não a saúde do banco ou
+# do RabbitMQ (healthcheck desligado): o cadastro continua sem o broker (ADR-0001).
+eureka:
+  client:
+    enabled: ${EUREKA_ENABLED:true}
+    fetch-registry: false             # o ms-user não chama outros serviços por HTTP
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+    healthcheck:
+      enabled: false
+  instance:
+    instance-id: ${spring.application.name}:${HOSTNAME:${random.value}}
+    prefer-ip-address: true
+    health-check-url-path: /health
+    status-page-url-path: /info
+    lease-renewal-interval-in-seconds: 5
+    # O servidor só despeja após 2x este valor sem heartbeat, mais a varredura de 5 s: ~25 s no pior caso.
+    lease-expiration-duration-in-seconds: ${EUREKA_LEASE_EXPIRATION_S:10}
+
+broker:
+  queue:
+    email:
+      name: ${EMAIL_QUEUE:email.boas-vindas}
+      dlq: ${EMAIL_DLQ:email.boas-vindas.dlq}
+
+# --- Observabilidade (ADR-0003) ---------------------------------------------
+logging:
+  structured:
+    format:
+      console: ecs          # logs em JSON (Elastic Common Schema); MDC (correlationId) vira campo do JSON
+  level:
+    root: INFO
+    com.ms.user: INFO
+
+management:
+  endpoints:
+    web:
+      base-path: /          # expõe /health, /info e /metrics na raiz
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: ${HEALTH_SHOW_DETAILS:always}   # produção: when-authorized
+      validate-group-membership: false   # não impede o boot se algum indicador não existir
+      probes:
+        enabled: true       # /health/liveness e /health/readiness
+      group:
+        readiness:
+          include: readinessState,db,rabbit
+  metrics:
+    distribution:
+      percentiles:
+        "[http.server.requests]": 0.5,0.95,0.99
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ms-user
+    description: Cadastro de usuários; publica pedido de e-mail de boas-vindas no RabbitMQ

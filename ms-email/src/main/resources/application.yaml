@@ -1,0 +1,136 @@
+# -----------------------------------------------------------------------------
+# ms-email — configuração
+# Nenhum segredo real fica neste arquivo (ver ADR-0004). Os valores padrão
+# abaixo só funcionam com o ambiente local do docker-compose e podem ser
+# sobrescritos por variáveis de ambiente.
+# -----------------------------------------------------------------------------
+spring:
+  application:
+    name: ms-email
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5434/ms_email}
+    username: ${DB_USERNAME:ms_email}
+    password: ${DB_PASSWORD:ms_email_dev}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      # Por réplica: 5 réplicas x 10 = 50 conexões, abaixo do max_connections=100 do Postgres.
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+  jpa:
+    hibernate:
+      ddl-auto: validate    # o esquema vem do Flyway (db/migration), ADR-0006
+    show-sql: ${SHOW_SQL:false}
+    open-in-view: false
+  flyway:
+    # Bancos criados pelo Hibernate antes do Flyway: baseline na V1, sem executá-la.
+    baseline-on-migrate: true
+    baseline-version: 1
+
+  rabbitmq:
+    addresses: ${RABBITMQ_ADDRESSES:amqp://app:app_dev@localhost:5672}
+    listener:
+      simple:
+        concurrency: ${CONSUMER_CONCURRENCY:2}
+        max-concurrency: ${CONSUMER_MAX_CONCURRENCY:4}
+        # Após esgotar as tentativas, a mensagem é rejeitada SEM recolocar na fila
+        # e o RabbitMQ a move para a DLQ (evita loop infinito de "poison message").
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          max-retries: 2        # 1 tentativa + 2 novas = 3 no total (Spring Boot 4: "max-attempts" virou "max-retries")
+          initial-interval: 1s  # espera 1 s e depois 2 s
+          multiplier: 2
+
+  # SMTP local = Mailpit (docker-compose). Para um SMTP real, defina as variáveis
+  # MAIL_HOST, MAIL_PORT, MAIL_USERNAME, MAIL_PASSWORD, MAIL_SMTP_AUTH=true e MAIL_SMTP_STARTTLS=true.
+  mail:
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${MAIL_SMTP_AUTH:false}
+          starttls:
+            enable: ${MAIL_SMTP_STARTTLS:false}
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+  mvc:
+    problemdetails:
+      enabled: true
+
+app:
+  mail:
+    from: ${MAIL_FROM:no-reply@cadastro.local}
+
+broker:
+  queue:
+    email:
+      name: ${EMAIL_QUEUE:email.boas-vindas}
+      dlq: ${EMAIL_DLQ:email.boas-vindas.dlq}
+
+server:
+  port: 8082
+
+# --- Service discovery (ADR-0005) --------------------------------------------
+# Status no registro segue o ciclo de vida da aplicação, não a saúde do banco ou
+# do RabbitMQ (healthcheck desligado). As mensagens não passam pelo gateway: o
+# RabbitMQ distribui a fila entre os consumidores de todas as réplicas.
+eureka:
+  client:
+    enabled: ${EUREKA_ENABLED:true}
+    fetch-registry: false             # o ms-email não chama outros serviços por HTTP
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+    healthcheck:
+      enabled: false
+  instance:
+    instance-id: ${spring.application.name}:${HOSTNAME:${random.value}}
+    prefer-ip-address: true
+    health-check-url-path: /health
+    status-page-url-path: /info
+    lease-renewal-interval-in-seconds: 5
+    # O servidor só despeja após 2x este valor sem heartbeat, mais a varredura de 5 s: ~25 s no pior caso.
+    lease-expiration-duration-in-seconds: ${EUREKA_LEASE_EXPIRATION_S:10}
+
+# --- Observabilidade (ADR-0003) ---------------------------------------------
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    root: INFO
+    com.ms.email: INFO
+
+management:
+  endpoints:
+    web:
+      base-path: /
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: ${HEALTH_SHOW_DETAILS:always}
+      validate-group-membership: false   # não impede o boot se algum indicador não existir
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db,rabbit
+  health:
+    # SMTP fora do ar NÃO deixa o serviço "unhealthy": o e-mail é registrado com status ERROR.
+    mail:
+      enabled: false
+  metrics:
+    distribution:
+      percentiles:
+        "[http.server.requests]": 0.5,0.95,0.99
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ms-email
+    description: Consome pedidos de e-mail do RabbitMQ, envia via SMTP e registra o histórico
