@@ -1,0 +1,57 @@
+### Requisições da demonstração — abrir no IntelliJ (HTTP Client nativo)
+### ou no VS Code com a extensão "REST Client". Funciona igual em Windows, macOS e Linux.
+### Tudo passa pelo api-gateway (:8080), que distribui entre as réplicas (ADR-0005).
+
+### 1. Health check do gateway (detalhes: réplicas registradas no Eureka em discoveryComposite)
+GET http://localhost:8080/health
+
+### 2. Readiness / liveness do gateway (usados pelo healthcheck do docker-compose)
+GET http://localhost:8080/health/readiness
+
+###
+GET http://localhost:8080/health/liveness
+
+### 3. Cadastrar usuário com Correlation ID escolhido por nós
+POST http://localhost:8080/user
+Content-Type: application/json
+X-Correlation-ID: apresentacao-0001
+
+{
+  "name": "Maria Silva",
+  "email": "maria.silva@example.com"
+}
+
+### 4. Cadastrar de novo o mesmo e-mail -> 409 Conflict (Problem Details com correlationId)
+POST http://localhost:8080/user
+Content-Type: application/json
+
+{
+  "name": "Maria Silva",
+  "email": "maria.silva@example.com"
+}
+
+### 5. Validação -> 400 Bad Request
+POST http://localhost:8080/user
+Content-Type: application/json
+
+{
+  "name": "",
+  "email": "nao-e-email"
+}
+
+### 6. Listagem paginada de usuários (repita: o header X-Correlation-ID muda e a réplica que atende alterna)
+GET http://localhost:8080/user?page=0&size=10
+
+### 7. Histórico de e-mails (mais recentes primeiro) — observe o campo correlationId
+GET http://localhost:8080/emails?page=0&size=10
+
+### 8. Registro do Eureka: instâncias de ms-user (instanceId, IP, status)
+GET http://localhost:8761/eureka/apps/MS-USER
+Accept: application/json
+
+### 9. Métricas medidas na borda (gateway): requisições roteadas para o ms-user
+GET http://localhost:8080/metrics/spring.cloud.gateway.requests?tag=routeId:ms-user
+
+### 10. p95 das requisições roteadas para o ms-user, medido no gateway (troque phi por 0.5 ou 0.99)
+### As métricas de cada réplica continuam no próprio serviço, sem porta no host (docs/arquitetura.md §6.4)
+GET http://localhost:8080/metrics/spring.cloud.gateway.requests.percentile?tag=routeId:ms-user&tag=phi:0.95

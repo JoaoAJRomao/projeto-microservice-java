@@ -1,0 +1,263 @@
+# =============================================================================
+#  Cadastro de Usuários + Notificação por E-mail — ambiente completo
+#
+#  Subir tudo (build incluso):   docker compose up --build -d
+#  Acompanhar a saúde:           docker compose ps
+#  Mudar o número de réplicas:   docker compose up -d --scale ms-user=4   (ou MS_USER_REPLICAS no .env)
+#  Teste de carga (k6):          docker compose --profile loadtest run --rm k6
+#  Derrubar (mantém dados):      docker compose down        | apagar dados: docker compose down -v
+#
+#  Funciona sem nenhum arquivo .env (valores de desenvolvimento como padrão).
+#  Para trocar senhas/portas, copie .env.example para .env e edite (ADR-0004).
+#
+#  Só o api-gateway publica porta HTTP no host (:8080). Os serviços rodam em
+#  réplicas, registram-se no discovery-server e são alcançados pelo gateway (ADR-0005).
+# =============================================================================
+name: cadastro-notificacao
+
+x-java-service: &java-service
+  restart: unless-stopped
+  deploy: &java-deploy
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 768M
+
+x-java-infra: &java-infra
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+services:
+
+  # ---------------------------------------------------------------- broker ---
+  rabbitmq:
+    image: rabbitmq:4-management
+    hostname: rabbitmq              # nome do nó fixo -> dados do volume continuam válidos
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-app}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-app_dev}
+    ports:
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"        # AMQP (para rodar os serviços pela IDE)
+      - "127.0.0.1:${RABBITMQ_UI_PORT:-15672}:15672"   # UI de gerenciamento
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks: [broker-net]
+
+  # ------------------------------------------------- bancos (1 por serviço) ---
+  user-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ms_user
+      POSTGRES_USER: ${USER_DB_USER:-ms_user}
+      POSTGRES_PASSWORD: ${USER_DB_PASSWORD:-ms_user_dev}
+      TZ: America/Sao_Paulo
+      PGTZ: America/Sao_Paulo
+    ports:
+      - "127.0.0.1:${USER_DB_PORT:-5433}:5432"
+    volumes:
+      - user-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [user-net]           # só o ms-user enxerga este banco (ADR-0002)
+
+  email-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ms_email
+      POSTGRES_USER: ${EMAIL_DB_USER:-ms_email}
+      POSTGRES_PASSWORD: ${EMAIL_DB_PASSWORD:-ms_email_dev}
+      TZ: America/Sao_Paulo
+      PGTZ: America/Sao_Paulo
+    ports:
+      - "127.0.0.1:${EMAIL_DB_PORT:-5434}:5432"
+    volumes:
+      - email-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [email-net]          # só o ms-email enxerga este banco (ADR-0002)
+
+  # ------------------------------------------------ SMTP de desenvolvimento ---
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"      # caixa de entrada web
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"    # SMTP (para rodar o ms-email pela IDE)
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks: [email-net]
+
+  # --------------------------------------------- borda e service discovery ---
+  discovery-server:
+    <<: *java-infra
+    build: ./discovery-server
+    image: cadastro-notificacao/discovery-server:1.0.0
+    environment:
+      EUREKA_HOSTNAME: discovery-server
+      TZ: America/Sao_Paulo
+    ports:
+      - "127.0.0.1:${DISCOVERY_UI_PORT:-8761}:8761"    # painel do Eureka
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8761/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks: [edge]
+
+  api-gateway:
+    <<: *java-infra
+    build: ./api-gateway
+    image: cadastro-notificacao/api-gateway:1.0.0
+    environment:
+      EUREKA_URL: http://discovery-server:8761/eureka/
+      HEALTH_SHOW_DETAILS: ${HEALTH_SHOW_DETAILS:-always}
+      TZ: America/Sao_Paulo
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"                   # única porta HTTP de aplicação no host
+    depends_on:
+      discovery-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks: [edge]
+
+  # ---------------------------------------------------------- microsserviços ---
+  # Sem "ports": mais de uma réplica não pode publicar a mesma porta no host.
+  ms-user:
+    <<: *java-service
+    build: ./ms-user
+    image: cadastro-notificacao/ms-user:1.0.0
+    deploy:
+      <<: *java-deploy
+      replicas: ${MS_USER_REPLICAS:-2}
+    environment:
+      DB_URL: jdbc:postgresql://user-db:5432/ms_user
+      DB_USERNAME: ${USER_DB_USER:-ms_user}
+      DB_PASSWORD: ${USER_DB_PASSWORD:-ms_user_dev}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-10}
+      RABBITMQ_ADDRESSES: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app_dev}@rabbitmq:5672
+      EUREKA_URL: http://discovery-server:8761/eureka/
+      HEALTH_SHOW_DETAILS: ${HEALTH_SHOW_DETAILS:-always}
+      TZ: America/Sao_Paulo
+    depends_on:
+      user-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      # Registro fora do ar não impede a subida: o cliente Eureka tenta de novo a cada 5 s.
+      discovery-server:
+        condition: service_started
+      # Não depende do ms-email: a comunicação é assíncrona (ADR-0001).
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks: [edge, broker-net, user-net]
+
+  ms-email:
+    <<: *java-service
+    build: ./ms-email
+    image: cadastro-notificacao/ms-email:1.0.0
+    deploy:
+      <<: *java-deploy
+      replicas: ${MS_EMAIL_REPLICAS:-2}
+    environment:
+      DB_URL: jdbc:postgresql://email-db:5432/ms_email
+      DB_USERNAME: ${EMAIL_DB_USER:-ms_email}
+      DB_PASSWORD: ${EMAIL_DB_PASSWORD:-ms_email_dev}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-10}
+      RABBITMQ_ADDRESSES: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app_dev}@rabbitmq:5672
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+      MAIL_FROM: ${MAIL_FROM:-no-reply@cadastro.local}
+      EUREKA_URL: http://discovery-server:8761/eureka/
+      HEALTH_SHOW_DETAILS: ${HEALTH_SHOW_DETAILS:-always}
+      TZ: America/Sao_Paulo
+    depends_on:
+      email-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks: [edge, broker-net, email-net]
+
+  # ------------------------------------------- teste de carga (sob demanda) ---
+  # Não sobe com "docker compose up". Rodar com:
+  #   docker compose --profile loadtest run --rm k6
+  #   docker compose --profile loadtest run --rm -e RATE=100 -e DURATION=3m k6
+  k6:
+    image: grafana/k6:2.3.0
+    profiles: ["loadtest"]
+    user: "0:0"                    # permite gravar o resultado na pasta montada (Linux)
+    environment:
+      BASE_URL_USER: http://api-gateway:8080
+      BASE_URL_EMAIL: http://api-gateway:8080
+      RATE: ${LOAD_RATE:-50}
+      DURATION: ${LOAD_DURATION:-2m}
+      RESULTS_DIR: /results
+    volumes:
+      - ./load-test:/scripts:ro
+      - ./docs/performance/resultados:/results
+    command: ["run", "/scripts/carga-cadastro.js"]
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+      ms-user:
+        condition: service_healthy
+      ms-email:
+        condition: service_healthy
+    networks: [edge]
+
+# Redes separadas = isolamento: cada banco só é alcançável pelo seu serviço.
+networks:
+  edge: {}
+  broker-net: {}
+  user-net: {}
+  email-net: {}
+
+volumes:
+  rabbitmq-data:
+  user-db-data:
+  email-db-data:
