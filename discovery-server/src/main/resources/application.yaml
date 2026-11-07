@@ -1,0 +1,49 @@
+# -----------------------------------------------------------------------------
+# discovery-server — registro de serviços (Eureka), ADR-0005
+# Instância única: os clientes guardam o último registro em cache e continuam
+# roteando se este servidor cair (ver docs/arquitetura.md §9).
+# -----------------------------------------------------------------------------
+spring:
+  application:
+    name: discovery-server
+
+server:
+  port: 8761
+
+eureka:
+  instance:
+    hostname: ${EUREKA_HOSTNAME:localhost}
+  client:
+    # Standalone: o servidor não se registra nem busca registro de outro servidor.
+    register-with-eureka: false
+    fetch-registry: false
+  server:
+    # Valores de desenvolvimento: uma réplica que some sai do registro em segundos,
+    # em vez dos ~90 s do padrão. Self-preservation desligado para que réplicas
+    # derrubadas com "docker kill" sejam de fato removidas.
+    enable-self-preservation: ${EUREKA_SELF_PRESERVATION:false}
+    eviction-interval-timer-in-ms: ${EUREKA_EVICTION_INTERVAL_MS:5000}
+    use-read-only-response-cache: false
+    wait-time-in-ms-when-sync-empty: 0
+
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    root: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+info:
+  app:
+    name: discovery-server
+    description: Registro de instâncias (Eureka) usado pelo api-gateway para balancear entre réplicas
